@@ -1,84 +1,128 @@
-from flask import Flask, render_template, redirect, url_for, flash, session, request
+from flask import Flask, render_template, request, redirect, session
 from flask_mysqldb import MySQL
-from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField, SubmitField, TextAreaField
-from wtforms.validators import DataRequired, Length, Email, EqualTo
-from flask_bcrypt import Bcrypt
-from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-from config import Config
-from models import init_db
+import MySQLdb.cursors
+import re
 
 app = Flask(__name__)
-app.config.from_object(Config)
+
+# Secret key for session management
+app.secret_key = 'your_secret_key'
+
+# MySQL configurations
+app.config['MYSQL_HOST'] = 'localhost'
+app.config['MYSQL_USER'] = 'ross'
+app.config['MYSQL_PASSWORD'] = 'K@y1eigh1908'  # Use your MySQL password
+app.config['MYSQL_DB'] = 'flaskapp'
 
 mysql = MySQL(app)
-bcrypt = Bcrypt(app)
-login_manager = LoginManager(app)
-login_manager.login_view = 'login'
 
-# Database initialization
-init_db(app)
+# Home Route
+@app.route('/')
+def home():
+    return render_template('home.html')
 
-@login_manager.user_loader
-def load_user(user_id):
-    cur = mysql.connection.cursor()
-    cur.execute("SELECT * FROM users WHERE id=%s", (user_id,))
-    user = cur.fetchone()
-    if user:
-        return UserMixin(id=user[0])
-    return None
-
-# Registration Form
-class RegistrationForm(FlaskForm):
-    username = StringField('Username', validators=[DataRequired(), Length(min=2, max=20)])
-    email = StringField('Email', validators=[DataRequired(), Email()])
-    password = PasswordField('Password', validators=[DataRequired()])
-    confirm_password = PasswordField('Confirm Password', validators=[DataRequired(), EqualTo('password')])
-    submit = SubmitField('Sign Up')
-
-# Recipe Form
-class RecipeForm(FlaskForm):
-    title = StringField('Recipe Title', validators=[DataRequired()])
-    content = TextAreaField('Recipe Content', validators=[DataRequired()])
-    submit = SubmitField('Submit Recipe')
-
-@app.route("/register", methods=['GET', 'POST'])
+# Registration Route
+@app.route('/register', methods=['GET', 'POST'])
 def register():
-    form = RegistrationForm()
-    if form.validate_on_submit():
-        hashed_password = bcrypt.generate_password_hash(form.password.data).decode('utf-8')
-        cur = mysql.connection.cursor()
-        cur.execute("INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
-                    (form.username.data, form.email.data, hashed_password))
-        mysql.connection.commit()
-        flash(f'Account created for {form.username.data}!', 'success')
-        return redirect(url_for('login'))
-    return render_template('register.html', form=form)
+    if request.method == 'POST':
+        # Get form fields
+        username = request.form['username']
+        password = request.form['password']
+        email = request.form['email']
+        
+        # Basic validation for email format
+        if not re.match(r'[^@]+@[^@]+\.[^@]+', email):
+            return "Invalid email address!"
 
-@app.route("/login", methods=['GET', 'POST'])
+        cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+        cursor.execute('INSERT INTO users (username, password, email) VALUES (%s, %s, %s)', (username, password, email))
+        mysql.connection.commit()
+        return redirect('/')
+    return render_template('register.html')
+
+# Login Route
+@app.route('/login', methods=['GET', 'POST'])
 def login():
-    # Add login logic here
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+        cursor.execute('SELECT * FROM users WHERE username = %s AND password = %s', (username, password))
+        user = cursor.fetchone()
+        
+        if user:
+            session['loggedin'] = True
+            session['username'] = user['username']
+            return redirect('/submit_recipe')
+        else:
+            return "Invalid credentials!"
     return render_template('login.html')
 
-@app.route("/recipe/new", methods=['GET', 'POST'])
-@login_required
-def new_recipe():
-    form = RecipeForm()
-    if form.validate_on_submit():
-        cur = mysql.connection.cursor()
-        cur.execute("INSERT INTO recipes (title, content, user_id) VALUES (%s, %s, %s)",
-                    (form.title.data, form.content.data, current_user.id))
+# Submit Recipe Route
+@app.route('/submit_recipe', methods=['GET', 'POST'])
+def submit_recipe():
+    if 'loggedin' in session:
+        if request.method == 'POST':
+            recipe_name = request.form['recipe_name']
+            ingredients = request.form['ingredients']
+            instructions = request.form['instructions']
+            
+            cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+            cursor.execute('INSERT INTO recipes (username, recipe_name, ingredients, instructions) VALUES (%s, %s, %s, %s)', 
+                           (session['username'], recipe_name, ingredients, instructions))
+            mysql.connection.commit()
+            return "Recipe submitted successfully!"
+        return render_template('submit_recipe.html')
+    return redirect('/login')
+ 
+@app.route('/members', methods=['GET'])
+def members():
+    # Check if the user is logged in
+    if 'loggedin' in session:
+        cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+        # Fetch all recipes submitted by the logged-in user
+        cursor.execute('SELECT * FROM recipes WHERE username = %s', [session['username']])
+        recipes = cursor.fetchall()
+        return render_template('members.html', recipes=recipes)
+    return redirect('/login')
+
+@app.route('/edit_recipe/<int:id>', methods=['GET', 'POST'])
+def edit_recipe(id):
+    if 'loggedin' in session:
+        cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+        
+        # Fetch the specific recipe to edit
+        cursor.execute('SELECT * FROM recipes WHERE id = %s AND username = %s', (id, session['username']))
+        recipe = cursor.fetchone()
+        
+        if request.method == 'POST':
+            # Update the recipe with the new data
+            new_name = request.form['recipe_name']
+            new_ingredients = request.form['ingredients']
+            new_instructions = request.form['instructions']
+            cursor.execute('UPDATE recipes SET recipe_name = %s, ingredients = %s, instructions = %s WHERE id = %s',
+                           (new_name, new_ingredients, new_instructions, id))
+            mysql.connection.commit()
+            return redirect('/members')
+        
+        return render_template('edit_recipe.html', recipe=recipe)
+    return redirect('/login')
+
+
+@app.route('/delete_recipe/<int:id>', methods=['GET'])
+def delete_recipe(id):
+    if 'loggedin' in session:
+        cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+        
+        # Delete the recipe
+        cursor.execute('DELETE FROM recipes WHERE id = %s AND username = %s', (id, session['username']))
         mysql.connection.commit()
-        flash('Your recipe has been posted!', 'success')
-        return redirect(url_for('home'))
-    return render_template('create_recipe.html', form=form)
+        
+        return redirect('/members')
+    return redirect('/login')
 
-@app.route("/home")
-def home():
-    cur = mysql.connection.cursor()
-    cur.execute("SELECT * FROM recipes")
-    recipes = cur.fetchall()
-    return render_template('home.html', recipes=recipes)
 
-if __name__ == '__main__':
+# Run the app
+if __name__ == "__main__":
     app.run(debug=True)
